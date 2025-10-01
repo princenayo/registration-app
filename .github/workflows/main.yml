@@ -1,0 +1,110 @@
+name: Build, Push to ECR and Deploy to EC2
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+  FRONTEND_IMAGE: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/registration-frontend:latest
+  BACKEND_IMAGE: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/registration-backend:latest
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build and push frontend image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        REPOSITORY: registration-frontend
+        IMAGE_TAG: latest
+      run: |
+        docker build -t $ECR_REGISTRY/$REPOSITORY:$IMAGE_TAG -f Dockerfile.frontend .
+        docker push $ECR_REGISTRY/$REPOSITORY:$IMAGE_TAG
+
+    - name: Build and push backend image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        REPOSITORY: registration-backend
+        IMAGE_TAG: latest
+      run: |
+        docker build -t $ECR_REGISTRY/$REPOSITORY:$IMAGE_TAG -f Dockerfile.backend .
+        docker push $ECR_REGISTRY/$REPOSITORY:$IMAGE_TAG
+
+  deploy-to-ec2:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Deploy to EC2
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        key: ${{ secrets.EC2_SSH_KEY }}
+        script: |
+          # Create app directory
+          mkdir -p /home/ubuntu/app
+          cd /home/ubuntu/app
+          
+          # Create docker-compose file
+          cat > docker-compose.yml << 'EOF'
+          services:
+            frontend:
+              image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/registration-frontend:latest
+              ports:
+                - "9090:3000"
+              depends_on:
+                - backend
+
+            backend:
+              image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/registration-backend:latest
+              ports:
+                - "9091:8000"
+              environment:
+                - SECRET_KEY=${{ secrets.SECRET_KEY }}
+          EOF
+          
+          # Install dependencies if not already installed
+          which docker || (curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh)
+          which docker-compose || (sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && sudo chmod +x /usr/local/bin/docker-compose)
+          which aws || (sudo apt-get update && sudo apt-get install -y awscli)
+          
+          # Configure AWS CLI
+          aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws configure set default.region ${{ env.AWS_REGION }}
+          
+          # Login to ECR
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+          
+          # Stop and remove existing containers
+          docker-compose down || true
+          
+          # Pull latest images
+          docker-compose pull
+          
+          # Start services
+          docker-compose up -d
+          
+          # Clean up unused images
+          docker image prune -f
