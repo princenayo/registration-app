@@ -27,7 +27,7 @@ function Dashboard() {
             <Paper sx={{ p: 2, display: 'flex', flexDirection: 'column' }}>
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
                 <Typography component="h1" variant="h4">
-                  Dashboard We succesfully deployed the application to ECR
+                  Dashboard for PRINCE NAYO FROM POD 13
                 </Typography>
                 <Button variant="contained" color="secondary" onClick={handleLogout}>
                   Logout
